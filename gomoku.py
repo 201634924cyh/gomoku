@@ -1,0 +1,906 @@
+# -*- coding: utf-8 -*-
+"""
+五子棋 Gomoku —— pygame 单文件实现
+
+特性
+  * 15x15 标准棋盘，木纹程序化生成，棋子为逐像素生成的立体圆石
+  * 三种模式：人机(你执黑) / 人机(你执白) / 双人对战
+  * 三档 AI 难度：简单 / 普通 / 困难（棋型评分 + 双威胁识别 + 2 层前瞻）
+  * 悔棋、重开、鼠标悬停预览、最后一手标记、连五高亮动画
+  * 音效全部由 numpy 实时合成，不依赖任何外部素材文件
+
+运行：python gomoku.py
+无窗口自检：python gomoku.py --headless --frames 600
+"""
+
+import os
+import math
+import random
+import argparse
+
+import pygame
+
+# --------------------------------------------------------------------------
+# 常量与布局
+# --------------------------------------------------------------------------
+N = 15                      # 棋盘路数
+CELL = 40                   # 格距
+MARGIN = 46                 # 棋盘内边距
+GRID_PX = (N - 1) * CELL   # 560
+BOARD_PX = GRID_PX + MARGIN * 2     # 652
+HUD_TOP = 78
+HUD_BOT = 84
+W = BOARD_PX
+H = HUD_TOP + BOARD_PX + HUD_BOT    # 814
+BOARD_Y = HUD_TOP
+STONE_R = 17
+STONE_SIZE = STONE_R * 2 + 2
+
+EMPTY, BLACK, WHITE = 0, 1, 2
+DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
+
+# 配色
+C_PANEL = (33, 38, 48)
+C_PANEL_LINE = (52, 59, 73)
+C_TEXT = (232, 236, 244)
+C_MUTED = (146, 157, 175)
+C_ACCENT = (255, 176, 59)
+C_WIN = (232, 88, 74)
+C_BTN = (48, 55, 68)
+C_BTN_HOVER = (64, 74, 92)
+C_BTN_DOWN = (36, 42, 53)
+C_WOOD = (222, 179, 127)
+C_WOOD_DARK = (212, 168, 115)
+C_WOOD_LIGHT = (231, 191, 142)
+C_LINE = (92, 62, 36)
+C_COORD = (128, 94, 58)
+
+# 中文字体候选路径，按平台逐个探测；全找不到时退回 SysFont 字体族列表。
+FONT_CANDIDATES = [
+    # Windows
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\simsun.ttc",
+    r"C:\Windows\Fonts\arialbd.ttf",
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+    # Linux
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+# SysFont 回退：按优先级列出各平台常见中文字体族，避免中文渲染成方块
+FONT_FAMILIES = ("microsoftyahei,simhei,pingfangsc,hiraginosansgb,"
+                 "notosanscjksc,notosanscjk,wenquanyimicrohei,wqyzenhei,"
+                 "arialunicodems,arial")
+
+MODES = (
+    ("人机 · 你执黑", 0),
+    ("人机 · 你执白", 1),
+    ("双人对战", 2),
+)
+LEVEL_NAMES = ("", "简单", "普通", "困难")
+
+# --------------------------------------------------------------------------
+# 棋型分值
+# --------------------------------------------------------------------------
+FIVE = 10_000_000
+OPEN_FOUR = 500_000
+RUSH_FOUR = 50_000
+LIVE_THREE = 30_000
+SLEEP_THREE = 2_000
+LIVE_TWO = 1_000
+SLEEP_TWO = 200
+
+# (模式, 分值)  —— 按优先级排列，命中即返回
+# '1'=自己  '0'=空  '2'=对方或棋盘外
+PATTERNS = (
+    ("11111", FIVE),
+    ("011110", OPEN_FOUR),
+    ("011112", RUSH_FOUR), ("211110", RUSH_FOUR),
+    ("11011", RUSH_FOUR), ("10111", RUSH_FOUR), ("11101", RUSH_FOUR),
+    ("011100", LIVE_THREE), ("001110", LIVE_THREE),
+    ("010110", LIVE_THREE), ("011010", LIVE_THREE),
+    ("01110", SLEEP_THREE),
+    ("001112", SLEEP_THREE), ("211100", SLEEP_THREE),
+    ("010112", SLEEP_THREE), ("211010", SLEEP_THREE),
+    ("011012", SLEEP_THREE), ("210110", SLEEP_THREE),
+    ("10011", SLEEP_THREE), ("11001", SLEEP_THREE), ("10101", SLEEP_THREE),
+    ("001100", LIVE_TWO), ("011000", LIVE_TWO), ("000110", LIVE_TWO),
+    ("010100", LIVE_TWO), ("001010", LIVE_TWO), ("010010", LIVE_TWO),
+    ("01100", SLEEP_TWO), ("00110", SLEEP_TWO),
+    ("01010", SLEEP_TWO), ("01000", SLEEP_TWO), ("00010", SLEEP_TWO),
+)
+
+
+# --------------------------------------------------------------------------
+# AI —— 棋型扫描
+# --------------------------------------------------------------------------
+def _window(b, r, c, dr, dc, player):
+    """以 (r,c) 为落点，沿 (dr,dc) 取长度 9 的窗口字符串，中心下标为 4。"""
+    ch = []
+    opp = 3 - player
+    for k in range(-4, 5):
+        if k == 0:
+            ch.append("1")          # 落点视为己方子
+            continue
+        rr, cc = r + dr * k, c + dc * k
+        if not (0 <= rr < N and 0 <= cc < N):
+            ch.append("2")          # 棋盘外按被堵处理
+            continue
+        v = b[rr][cc]
+        ch.append("1" if v == player else ("0" if v == EMPTY else "2"))
+    return "".join(ch)
+
+
+def dir_score(b, r, c, dr, dc, player):
+    """单方向棋型分：要求匹配到的模式必须覆盖中心落点。"""
+    s = _window(b, r, c, dr, dc, player)
+    for pat, sc in PATTERNS:
+        start = 0
+        plen = len(pat)
+        while True:
+            i = s.find(pat, start)
+            if i < 0:
+                break
+            if i <= 4 < i + plen:
+                return sc
+            start = i + 1
+    return 0
+
+
+def scan(b, r, c, player):
+    return [dir_score(b, r, c, dr, dc, player) for dr, dc in DIRS]
+
+
+def score_point(b, r, c, player):
+    return sum(scan(b, r, c, player))
+
+
+def makes_five(b, r, c, player):
+    for dr, dc in DIRS:
+        cnt = 1
+        for sgn in (1, -1):
+            rr, cc = r + dr * sgn, c + dc * sgn
+            while 0 <= rr < N and 0 <= cc < N and b[rr][cc] == player:
+                cnt += 1
+                rr += dr * sgn
+                cc += dc * sgn
+        if cnt >= 5:
+            return True
+    return False
+
+
+def candidates(b, radius=2):
+    stones = [(r, c) for r in range(N) for c in range(N) if b[r][c]]
+    if not stones:
+        return [(N // 2, N // 2)]
+    out, seen = [], set()
+    for r, c in stones:
+        for dr in range(-radius, radius + 1):
+            for dc in range(-radius, radius + 1):
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < N and 0 <= cc < N and b[rr][cc] == EMPTY:
+                    if (rr, cc) not in seen:
+                        seen.add((rr, cc))
+                        out.append((rr, cc))
+    return out
+
+
+def evaluate_move(b, r, c, me, threats=True):
+    """返回 (综合分值, 我方落此点的攻击分, 对方落此点的攻击分)。"""
+    opp = 3 - me
+    md = scan(b, r, c, me)
+    od = scan(b, r, c, opp)
+    my_s = sum(md)
+    op_s = sum(od)
+    val = my_s * 1.15 + op_s
+    if threats:
+        n4 = sum(1 for s in md if s >= RUSH_FOUR)
+        n3 = sum(1 for s in md if LIVE_THREE <= s < RUSH_FOUR)
+        if n4 and n3:
+            val += 400_000          # 我形成四三杀
+        if n3 >= 2:
+            val += 280_000          # 我形成双活三
+        o4 = sum(1 for s in od if s >= RUSH_FOUR)
+        o3 = sum(1 for s in od if LIVE_THREE <= s < RUSH_FOUR)
+        if o4 and o3:
+            val += 360_000          # 必须拆掉对手的四三
+        if o3 >= 2:
+            val += 260_000          # 必须拆掉对手的双活三
+    return val, my_s, op_s
+
+
+def ai_choose(b, me, level):
+    cands = candidates(b)
+    if not cands:
+        return None
+    if len(b) and all(b[r][c] == EMPTY for r in range(N) for c in range(N)):
+        return (N // 2, N // 2)
+    if len(cands) == 1:
+        return cands[0]
+
+    opp = 3 - me
+    for p in cands:                                  # 能赢立刻赢
+        if makes_five(b, p[0], p[1], me):
+            return p
+    blocks = [p for p in cands if makes_five(b, p[0], p[1], opp)]
+    if blocks:                                       # 对手能赢必须堵
+        return max(blocks, key=lambda p: score_point(b, p[0], p[1], me))
+
+    scored = []
+    for p in cands:
+        v = evaluate_move(b, p[0], p[1], me, level >= 2)[0]
+        scored.append((v, p))
+    scored.sort(key=lambda x: -x[0])
+
+    if level <= 1:
+        top = scored[:min(5, len(scored))]
+        return random.choice(top)[1]
+    if level == 2:
+        best = scored[0][0]
+        top = [s for s in scored if s[0] >= best * 0.98][:4]
+        return random.choice(top)[1]
+
+    # 困难：对候选前 6 手做 2 层前瞻，扣掉对手最佳反击的价值
+    refined = []
+    for v, p in scored[:6]:
+        b[p[0]][p[1]] = me
+        opp_best = 0
+        for q in candidates(b)[:70]:
+            ov = evaluate_move(b, q[0], q[1], opp, False)[1]
+            if ov > opp_best:
+                opp_best = ov
+        b[p[0]][p[1]] = EMPTY
+        refined.append((v - opp_best * 0.92, p))
+    refined.sort(key=lambda x: -x[0])
+    return refined[0][1]
+
+
+# --------------------------------------------------------------------------
+# 资源生成
+# --------------------------------------------------------------------------
+def build_board_surface():
+    surf = pygame.Surface((BOARD_PX, BOARD_PX))
+    surf.fill(C_WOOD)
+    rng = random.Random(20260918)
+    for _ in range(170):                       # 木纹
+        y = rng.uniform(-20, BOARD_PX + 20)
+        amp = rng.uniform(1.5, 7.0)
+        per = rng.uniform(140, 460)
+        ph = rng.uniform(0, math.tau)
+        col = C_WOOD_DARK if rng.random() < 0.55 else C_WOOD_LIGHT
+        pts = [(x, y + amp * math.sin(math.tau * x / per + ph))
+               for x in range(0, BOARD_PX + 1, 8)]
+        pygame.draw.lines(surf, col, False, pts, 1)
+
+    for i in range(N):                         # 网格
+        p = MARGIN + i * CELL
+        pygame.draw.line(surf, C_LINE, (MARGIN, p), (MARGIN + GRID_PX, p), 1)
+        pygame.draw.line(surf, C_LINE, (p, MARGIN), (p, MARGIN + GRID_PX), 1)
+    pygame.draw.rect(surf, C_LINE, (MARGIN, MARGIN, GRID_PX, GRID_PX), 2)
+
+    for r, c in ((3, 3), (3, 11), (11, 3), (11, 11), (7, 7)):   # 星位
+        pygame.draw.circle(surf, C_LINE,
+                           (MARGIN + c * CELL, MARGIN + r * CELL), 4)
+
+    f = get_font(14)                            # 坐标
+    for i in range(N):
+        img = f.render(chr(ord("A") + i), True, C_COORD)
+        surf.blit(img, img.get_rect(center=(MARGIN + i * CELL, MARGIN - 24)))
+        img = f.render(str(i + 1), True, C_COORD)
+        surf.blit(img, img.get_rect(center=(MARGIN - 24, MARGIN + i * CELL)))
+    return surf
+
+
+def make_stone(radius, base_rgb):
+    """逐像素生成带高光的立体棋子（纯 pygame，无 numpy 依赖）。"""
+    size = radius * 2 + 2
+    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+    c = (size - 1) / 2.0
+    lx, ly, lz = -0.42, -0.60, 0.68
+    nrm = math.sqrt(lx * lx + ly * ly + lz * lz)
+    lx, ly, lz = lx / nrm, ly / nrm, lz / nrm
+    br, bg, bb = base_rgb
+    set_at = surf.set_at
+    for y in range(size):
+        dy = (y - c) / radius
+        for x in range(size):
+            dx = (x - c) / radius
+            d2 = dx * dx + dy * dy
+            a = radius + 0.5 - math.sqrt(d2) * radius
+            if a <= 0:
+                continue
+            if a > 1.0:
+                a = 1.0
+            z = math.sqrt(max(0.0, 1.0 - d2))
+            lam = dx * lx + dy * ly + z * lz
+            lam = 0.0 if lam < 0 else (1.0 if lam > 1 else lam)
+            k = 0.28 + 0.92 * lam
+            spec = (lam ** 16) * 235.0
+            set_at((x, y), (
+                min(255, int(br * k + spec)),
+                min(255, int(bg * k + spec)),
+                min(255, int(bb * k + spec)),
+                int(a * 255)))
+    return surf
+
+
+def make_shadow(radius):
+    size = radius * 2 + 6
+    surf = pygame.Surface((size, size), pygame.SRCALPHA)
+    cx = cy = (size - 1) // 2
+    top = radius + 2
+    for r in range(top, 0, -1):
+        a = int(95 * (1 - r / top) ** 1.6)
+        pygame.draw.circle(surf, (20, 12, 4, a), (cx, cy), r)
+    return surf
+
+
+def get_font(size, bold=False):
+    key = (size, bold)
+    f = _FONT_CACHE.get(key)
+    if f is None:
+        path = None
+        for p in FONT_CANDIDATES:
+            if os.path.exists(p):
+                path = p
+                break
+        if path:
+            f = pygame.font.Font(path, size)
+            if bold:
+                f.set_bold(True)
+        else:
+            f = pygame.font.SysFont(FONT_FAMILIES, size, bold=bold)
+        _FONT_CACHE[key] = f
+    return f
+
+
+_FONT_CACHE = {}
+
+
+def draw_text(surf, text, size, color, pos, anchor="topleft", bold=False):
+    img = get_font(size, bold).render(text, True, color)
+    rect = img.get_rect(**{anchor: pos})
+    surf.blit(img, rect)
+    return rect
+
+
+# --------------------------------------------------------------------------
+# 音效（numpy 合成，缺失则静音）
+# --------------------------------------------------------------------------
+def _tone(f0, f1, dur, vol, wave="sine", lp=1):
+    import numpy as np
+    n = int(44100 * dur)
+    freq = np.linspace(f0, f1, n)
+    phase = np.cumsum(freq) * 2 * math.pi / 44100
+    if wave == "square":
+        sig = np.sign(np.sin(phase))
+    elif wave == "saw":
+        sig = 2 * ((phase / (2 * math.pi)) % 1) - 1
+    elif wave == "noise":
+        sig = np.random.uniform(-1, 1, n)
+    else:
+        sig = np.sin(phase)
+    if lp > 1:
+        sig = np.convolve(sig, np.ones(lp) / lp, mode="same")
+    env = np.exp(-np.linspace(0, 4.6, n))
+    data = np.int16(np.clip(sig * env * vol, -1, 1) * 32767)
+    return pygame.sndarray.make_sound(
+        np.ascontiguousarray(np.column_stack((data, data))))
+
+
+def build_sounds():
+    sfx = {}
+    try:
+        import numpy  # noqa: F401
+        sfx["black"] = _tone(880, 520, 0.09, 0.32, "square")
+        sfx["white"] = _tone(1046, 640, 0.09, 0.28, "square")
+        sfx["bad"] = _tone(180, 120, 0.16, 0.30, "saw")
+        seq = []
+        for f0 in (523, 659, 784, 1046):
+            seq.append(_tone(f0, f0 * 1.01, 0.14, 0.26, "sine"))
+        sfx["win_seq"] = seq
+        sfx["undo"] = _tone(600, 300, 0.08, 0.22, "sine")
+    except Exception:
+        sfx = {}
+    return sfx
+
+
+# --------------------------------------------------------------------------
+# 游戏主体
+# --------------------------------------------------------------------------
+TRACKED_KEYS = ("K_u", "K_r", "K_m", "K_1", "K_2", "K_3", "K_z", "K_ESCAPE")
+
+
+class Game:
+    def __init__(self, level=2):
+        self.level = max(1, min(3, level))
+        self.screen = pygame.display.set_mode((W, H))
+        pygame.display.set_caption("五子棋 Gomoku")
+        self.clock = pygame.time.Clock()
+        self.bg_board = build_board_surface()
+        self.stone_black = make_stone(STONE_R, (58, 58, 66))
+        self.stone_white = make_stone(STONE_R, (204, 204, 212))
+        self.shadow = make_shadow(STONE_R)
+        self.sfx = build_sounds()
+        self._win_played = False
+        self.mode = 0
+        self.reset()
+        self.running = True
+        self.frame = 0
+        self.t = 0.0
+        self.keys_prev = {}
+        self.mouse = (0, 0)
+        self.buttons = []
+        self.flash = None      # (r, c, 剩余秒数)
+
+    # ---------------- 状态 ----------------
+    def reset(self):
+        self.board = [[EMPTY] * N for _ in range(N)]
+        self.history = []
+        self.current = BLACK
+        self.state = "playing"
+        self.winner = 0
+        self.win_line = []
+        self.win_t = 0.0
+        self.last_move = None
+        self.ai_timer = 0.0
+        self.ai_thinking = False
+        self.flash = None
+        self._win_played = False
+
+    @property
+    def ai_color(self):
+        return WHITE if self.mode == 0 else (BLACK if self.mode == 1 else 0)
+
+    def is_ai_turn(self):
+        return (self.mode in (0, 1) and self.state == "playing"
+                and self.current == self.ai_color)
+
+    @property
+    def human_color(self):
+        return BLACK if self.mode == 0 else (WHITE if self.mode == 1 else 0)
+
+    # ---------------- 落子 ----------------
+    def place(self, r, c):
+        if self.state != "playing":
+            return False
+        if not (0 <= r < N and 0 <= c < N) or self.board[r][c] != EMPTY:
+            self.play("bad")
+            self.flash = (r, c, 0.35)
+            return False
+        p = self.current
+        self.board[r][c] = p
+        self.history.append((r, c, p))
+        self.last_move = (r, c)
+        self.play("black" if p == BLACK else "white")
+        line = self.check_win(r, c, p)
+        if line:
+            self.state = "over"
+            self.winner = p
+            self.win_line = line
+            self.win_t = 0.0
+        elif len(self.history) == N * N:
+            self.state = "over"
+            self.winner = 0
+        else:
+            self.current = 3 - p
+        return True
+
+    def check_win(self, r, c, p):
+        for dr, dc in DIRS:
+            line = [(r, c)]
+            for sgn in (1, -1):
+                rr, cc = r + dr * sgn, c + dc * sgn
+                while 0 <= rr < N and 0 <= cc < N and self.board[rr][cc] == p:
+                    line.append((rr, cc))
+                    rr += dr * sgn
+                    cc += dc * sgn
+            if len(line) >= 5:
+                return sorted(line)
+        return None
+
+    def undo(self):
+        if not self.history:
+            self.play("bad")
+            return
+        # 人机模式下一直回退到轮到人类为止（即撤销一整轮）
+        while self.history:
+            r, c, _ = self.history.pop()
+            self.board[r][c] = EMPTY
+            nxt = self.history[-1][2] ^ 3 if self.history else BLACK
+            if not (self.mode in (0, 1) and nxt == self.ai_color):
+                break
+        self.current = self.history[-1][2] ^ 3 if self.history else BLACK
+        self.state = "playing"
+        self.winner = 0
+        self.win_line = []
+        self.win_t = 0.0
+        self.ai_timer = 0.0
+        self.ai_thinking = False
+        self._win_played = False
+        self.last_move = ((self.history[-1][0], self.history[-1][1])
+                          if self.history else None)
+        self.play("undo")
+
+    def cycle_mode(self):
+        self.mode = (self.mode + 1) % len(MODES)
+        self.reset()
+
+    def cycle_level(self):
+        self.level = self.level % 3 + 1
+
+    def play(self, name):
+        s = self.sfx.get(name)
+        if s is None:
+            return
+        try:
+            s.play()
+        except Exception:
+            pass
+
+    # ---------------- 事件 ----------------
+    def handle_event(self, ev):
+        if ev.type == pygame.QUIT:
+            self.running = False
+        elif ev.type == pygame.MOUSEMOTION:
+            self.mouse = ev.pos
+        elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            self.mouse = ev.pos
+            if self.on_click(ev.pos):
+                return
+            r, c = self.pixel_to_cell(ev.pos)
+            if r is not None and 0 <= r < N and 0 <= c < N:
+                if self.mode in (0, 1) and self.current != self.human_color:
+                    self.play("bad")
+                    return
+                self.place(r, c)
+
+    def pixel_to_cell(self, pos):
+        x, y = pos
+        y -= BOARD_Y
+        if not (0 <= x < BOARD_PX and 0 <= y < BOARD_PX):
+            return None, None
+        c = round((x - MARGIN) / CELL)
+        r = round((y - MARGIN) / CELL)
+        if not (0 <= r < N and 0 <= c < N):
+            return None, None
+        cx, cy = MARGIN + c * CELL, MARGIN + r * CELL
+        if (x - cx) ** 2 + (y - cy) ** 2 > (CELL * 0.62) ** 2:
+            return None, None
+        return r, c
+
+    def cell_rect(self, r, c):
+        cx = MARGIN + c * CELL
+        cy = BOARD_Y + MARGIN + r * CELL
+        return pygame.Rect(cx - CELL // 2, cy - CELL // 2, CELL, CELL)
+
+    def on_click(self, pos):
+        for rect, key in self.buttons:
+            if rect.collidepoint(pos):
+                if key == "undo":
+                    self.undo()
+                elif key == "reset":
+                    self.reset()
+                elif key == "mode":
+                    self.cycle_mode()
+                elif key == "level":
+                    self.cycle_level()
+                return True
+        return False
+
+    # ---------------- 更新 ----------------
+    def update(self, dt, keys):
+        self.frame += 1
+        self.t += dt
+        if self.flash:
+            r, c, t = self.flash
+            t -= dt
+            self.flash = (r, c, t) if t > 0 else None
+
+        # 键盘（边沿触发，便于无窗口自检）
+        for name in TRACKED_KEYS:
+            code = getattr(pygame, name)
+            down = bool(keys[code])
+            if down and not self.keys_prev.get(name, False):
+                self.on_key(name)
+            self.keys_prev[name] = down
+
+        if self.state == "over":
+            self.win_t += dt
+            if self.win_line and not self._win_played:
+                self._win_played = True
+                self.play_win()
+            return
+
+        if self.is_ai_turn():
+            if not self.ai_thinking:
+                self.ai_thinking = True
+                self.ai_timer = 0.0
+            self.ai_timer += dt
+            if self.ai_timer >= (0.28 if self.history else 0.45):
+                mv = ai_choose(self.board, self.current, self.level)
+                self.ai_thinking = False
+                if mv is None:
+                    self.state = "over"
+                    self.winner = 0
+                else:
+                    self.place(mv[0], mv[1])
+        else:
+            self.ai_thinking = False
+
+    def on_key(self, name):
+        if name == "K_ESCAPE":
+            self.running = False
+        elif name == "K_r":
+            self.reset()
+        elif name == "K_u":
+            self.undo()
+        elif name == "K_m":
+            self.cycle_mode()
+        elif name == "K_z":
+            self.cycle_level()
+        elif name in ("K_1", "K_2", "K_3"):
+            self.level = int(name[-1])
+
+    def play_win(self):
+        try:
+            seq = self.sfx.get("win_seq")
+            if not seq:
+                return
+            for i, s in enumerate(seq):
+                ch = pygame.mixer.Channel(i + 1)
+                ch.play(s, loops=0)
+                ch.set_volume(1.0)
+        except Exception:
+            pass
+
+    # ---------------- 绘制 ----------------
+    def draw(self):
+        self.screen.fill(C_PANEL)
+        self.screen.blit(self.bg_board, (0, BOARD_Y))
+        self.draw_stones()
+        if self.state == "over":
+            self.draw_dim()          # 先压暗，再画连五高亮，最后盖结算面板
+            self.draw_win_fx()
+            self.draw_result_panel()
+        self.draw_top()
+        self.draw_bottom()
+
+    def draw_stones(self):
+        hover = None
+        if (self.state == "playing" and not self.is_ai_turn()
+                and self.mode in (0, 1, 2)):
+            r, c = self.pixel_to_cell(self.mouse)
+            if r is not None and self.board[r][c] == EMPTY:
+                hover = (r, c)
+
+        if self.flash:
+            r, c, t = self.flash
+            k = t / 0.35
+            rad = int(STONE_R + 6 * (1 - k))
+            pygame.draw.circle(self.screen, (200, 70, 60),
+                               self._cell_center(r, c), rad, 3)
+
+        for r in range(N):
+            for c in range(N):
+                v = self.board[r][c]
+                if v == EMPTY:
+                    continue
+                cx, cy = self._cell_center(r, c)
+                self.screen.blit(self.shadow,
+                                 (cx - self.shadow.get_width() // 2 + 2,
+                                  cy - self.shadow.get_height() // 2 + 3))
+                img = self.stone_black if v == BLACK else self.stone_white
+                self.screen.blit(img, (cx - STONE_SIZE // 2, cy - STONE_SIZE // 2))
+
+        if self.last_move and self.state in ("playing", "over"):
+            r, c = self.last_move
+            cx, cy = self._cell_center(r, c)
+            pygame.draw.circle(self.screen, C_WIN, (cx, cy), 4)
+
+        if hover is not None:
+            r, c = hover
+            cx, cy = self._cell_center(r, c)
+            img = (self.stone_black if self.current == BLACK else self.stone_white).copy()
+            img.set_alpha(105)
+            self.screen.blit(img, (cx - STONE_SIZE // 2, cy - STONE_SIZE // 2))
+            pygame.draw.circle(self.screen, C_ACCENT, (cx, cy), STONE_R, 2)
+
+    def draw_win_fx(self):
+        if not self.win_line:
+            return
+        pulse = (math.sin(self.win_t * 5.0) + 1) / 2
+        first = self._cell_center(*self.win_line[0])
+        last = self._cell_center(*self.win_line[-1])
+        width = int(4 + 6 * pulse)
+        overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+        pygame.draw.line(overlay, (232, 88, 74, int(90 + 90 * pulse)),
+                         first, last, width)
+        for r, c in self.win_line:
+            cx, cy = self._cell_center(r, c)
+            rad = int(STONE_R + 4 + 5 * pulse)
+            pygame.draw.circle(overlay, (255, 196, 80, int(120 + 100 * pulse)),
+                               (cx, cy), rad, 3)
+        self.screen.blit(overlay, (0, 0))
+
+    def _cell_center(self, r, c):
+        return (MARGIN + c * CELL, BOARD_Y + MARGIN + r * CELL)
+
+    def draw_top(self):
+        pygame.draw.rect(self.screen, C_PANEL, (0, 0, W, HUD_TOP))
+        pygame.draw.line(self.screen, C_PANEL_LINE, (0, HUD_TOP - 1), (W, HUD_TOP - 1))
+        r = draw_text(self.screen, "五子棋", 26, C_TEXT, (22, 12), bold=True)
+        draw_text(self.screen, "GOMOKU", 12, C_MUTED,
+                  (r.right + 10, r.centery + 5))
+
+        label = MODES[self.mode][0]
+        if self.mode != 2:
+            label += " · " + LEVEL_NAMES[self.level]
+        f = get_font(14)
+        tw = f.size(label)[0]
+        rect = pygame.Rect(22, 50, tw + 18, 22)
+        pygame.draw.rect(self.screen, (48, 55, 68), rect, border_radius=8)
+        draw_text(self.screen, label, 14, C_ACCENT, rect.center, anchor="center")
+
+        # 右侧回合指示
+        if self.state == "over":
+            txt = "对局结束"
+            col = C_ACCENT
+        elif self.ai_thinking:
+            dots = "." * (int(self.t * 3) % 4)
+            txt = "AI 思考中" + dots
+            col = C_MUTED
+        else:
+            txt = "黑棋回合" if self.current == BLACK else "白棋回合"
+            col = C_TEXT
+        f17 = get_font(17)
+        tw = f17.size(txt)[0]
+        tx = W - 22 - tw
+        draw_text(self.screen, txt, 17, col, (W - 22, 27), anchor="midright")
+        if self.state != "over":
+            icon = self.stone_black if self.current == BLACK else self.stone_white
+            shrink = pygame.transform.smoothscale(icon, (24, 24))
+            self.screen.blit(shrink, (tx - 34, 27 - 12))
+
+    def draw_bottom(self):
+        y0 = BOARD_Y + BOARD_PX
+        pygame.draw.rect(self.screen, C_PANEL, (0, y0, W, HUD_BOT))
+        pygame.draw.line(self.screen, C_PANEL_LINE, (0, y0), (W, y0))
+        self.buttons = []
+        specs = (("悔棋", "undo"), ("重开", "reset"),
+                 ("模式", "mode"), ("难度", "level"))
+        bw, bh, gap, x = 96, 42, 10, 20
+        y = y0 + 21
+        for text, key in specs:
+            rect = pygame.Rect(x, y, bw, bh)
+            hov = self._in_board_mouse(rect)
+            col = C_BTN_HOVER if hov else C_BTN
+            pygame.draw.rect(self.screen, col, rect, border_radius=10)
+            pygame.draw.rect(self.screen, (70, 80, 99), rect, 1, border_radius=10)
+            sub = {"undo": "U", "reset": "R", "mode": "M", "level": "1/2/3"}[key]
+            draw_text(self.screen, text, 16, C_TEXT, (rect.centerx, y + 13),
+                      anchor="center", bold=True)
+            draw_text(self.screen, sub, 11, C_MUTED, (rect.centerx, y + 31),
+                      anchor="center")
+            self.buttons.append((rect, key))
+            x += bw + gap
+
+        info = "第 %d 手" % len(self.history)
+        draw_text(self.screen, info, 16, C_MUTED, (W - 22, y + 8), anchor="topright")
+        draw_text(self.screen, "黑棋先行 · 连五为胜", 13, (100, 110, 128),
+                  (W - 22, y + 27), anchor="topright")
+
+    def _in_board_mouse(self, rect):
+        try:
+            return rect.collidepoint(pygame.mouse.get_pos())
+        except Exception:
+            return rect.collidepoint(self.mouse)
+
+    def draw_dim(self):
+        overlay = pygame.Surface((W, BOARD_PX), pygame.SRCALPHA)
+        overlay.fill((18, 22, 30, 132))
+        self.screen.blit(overlay, (0, BOARD_Y))
+
+    def draw_result_panel(self):
+        # 面板放到连五线的反方向，避免挡住获胜的五个子
+        pw, ph = 404, 168
+        if self.win_line:
+            avg_r = sum(r for r, _ in self.win_line) / float(len(self.win_line))
+        else:
+            avg_r = (N - 1) / 2.0
+        if avg_r < (N - 1) / 2.0:
+            py = BOARD_Y + BOARD_PX - ph - 28
+        else:
+            py = BOARD_Y + 28
+        panel = pygame.Rect((W - pw) // 2, py, pw, ph)
+
+        psurf = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        pygame.draw.rect(psurf, (40, 47, 60, 238), psurf.get_rect(), border_radius=16)
+        pygame.draw.rect(psurf, (88, 100, 124, 255), psurf.get_rect(), 1,
+                         border_radius=16)
+        self.screen.blit(psurf, panel.topleft)
+
+        if self.winner == 0:
+            title, col = "平局", C_TEXT
+        else:
+            who = "黑棋" if self.winner == BLACK else "白棋"
+            if self.mode in (0, 1):
+                title = "你赢了！" if self.winner == self.human_color else "AI 获胜"
+            else:
+                title = who + "获胜"
+            col = (C_ACCENT if self.mode in (0, 1)
+                   and self.winner == self.human_color else C_WIN)
+        title_rect = draw_text(self.screen, title, 38, col,
+                               (panel.centerx, panel.y + 52),
+                               anchor="center", bold=True)
+        if self.winner:
+            icon = self.stone_black if self.winner == BLACK else self.stone_white
+            shrink = pygame.transform.smoothscale(icon, (32, 32))
+            self.screen.blit(shrink,
+                             (title_rect.left - 44, panel.y + 52 - 16))
+        sub = "共 %d 手 · %s" % (len(self.history), MODES[self.mode][0])
+        draw_text(self.screen, sub, 15, C_MUTED, (panel.centerx, panel.y + 92),
+                  anchor="center")
+        draw_text(self.screen, "按 R 重新开始 / U 悔棋", 14, (128, 140, 160),
+                  (panel.centerx, panel.y + 128), anchor="center")
+
+    # ---------------- 主循环 ----------------
+    def step(self, dt, keys):
+        self.update(dt, keys)
+        self.draw()
+
+    def run(self, max_frames=0):
+        while self.running:
+            for ev in pygame.event.get():
+                self.handle_event(ev)
+            keys = pygame.key.get_pressed()
+            self.step(min(self.clock.tick(60) / 1000.0, 0.05), keys)
+            pygame.display.flip()
+            if max_frames and self.frame >= max_frames:
+                self.running = False
+
+
+# --------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--headless", action="store_true", help="虚拟显示，不弹窗")
+    ap.add_argument("--frames", type=int, default=0, help="跑够 N 帧后自动退出")
+    ap.add_argument("--level", type=int, default=2, choices=(1, 2, 3))
+    args = ap.parse_args()
+
+    if args.headless:
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+    pygame.mixer.pre_init(44100, -16, 2, 512)
+    pygame.init()
+    try:
+        pygame.mixer.init()
+    except Exception:
+        pass
+    try:
+        pygame.font.init()
+    except Exception:
+        pass
+
+    g = Game(level=args.level)
+    g.run(max_frames=args.frames)
+
+    if args.headless and args.frames:
+        pygame.image.save(g.screen,
+                          os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "shot_headless.png"))
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    main()

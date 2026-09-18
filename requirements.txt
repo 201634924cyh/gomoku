@@ -1,0 +1,5 @@
+# 唯一的必需依赖：图形窗口与输入事件。
+# Python 3.14 目前没有官方 pygame wheel，可以改装 pygame-ce
+# （社区分支，API 兼容，装完同样是 import pygame）：
+#   pip install pygame-ce
+pygame>=2.1
