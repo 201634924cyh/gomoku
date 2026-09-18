@@ -5,7 +5,7 @@
 ![Language](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Dependency](https://img.shields.io/badge/dependency-pygame-2C8E4E)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Selftest](https://img.shields.io/badge/selftest-65%20passed-brightgreen)
+![Selftest](https://img.shields.io/badge/selftest-66%20passed-brightgreen)
 
 ## 预览
 
@@ -66,7 +66,7 @@ cd gomoku
 python selftest.py
 ```
 
-用 `SDL_VIDEODRIVER=dummy` 起虚拟显示，跑 **65 项断言**，覆盖：
+用 `SDL_VIDEODRIVER=dummy` 起虚拟显示，跑 **66 项断言**，覆盖：
 
 - 棋型识别（活三 / 活四 / 冲四 / 连五 / 斜向）
 - AI 决策（能赢就赢、必堵冲四、必拆活三、落点合法）
@@ -89,7 +89,7 @@ python gomoku.py --headless --frames 600   # 虚拟显示跑 600 帧后自动退
 ```
 gomoku/
 ├── gomoku.py          # 游戏本体：棋盘渲染、棋子生成、AI、状态机（单文件）
-├── selftest.py        # 无窗口自检，65 项断言
+├── selftest.py        # 无窗口自检，66 项断言
 ├── run.bat            # Windows 启动脚本
 ├── run.sh             # macOS / Linux 启动脚本
 ├── requirements.txt   # 依赖（只有 pygame）

@@ -415,8 +415,16 @@ while g.state == "playing" and turns < 120:
     spin(g, 20)
     turns += 1
 check("鼠标对局能跑完", g.state == "over", "state=%s turns=%d" % (g.state, turns))
-check("鼠标对局有胜者", g.winner in (G.BLACK, G.WHITE), "winner=%s" % g.winner)
-print("    %d 回合结束，胜者 %s，共 %d 手" % (turns, g.winner, len(g.history)))
+# 弱 AI 对局可能是某一方连五，也可能一路下到满盘平局 —— 两者都算正常结束，
+# 不要断言"必须有胜者"，否则这个测试会随机挂。
+stones = sum(1 for r in range(G.N) for c in range(G.N) if g.board[r][c])
+check("棋盘与手数一致", stones == len(g.history),
+      "%d vs %d" % (stones, len(g.history)))
+check("终局形态自洽",
+      (len(g.win_line) >= 5) if g.winner else (stones == G.N * G.N),
+      "winner=%s win_line=%d stones=%d" % (g.winner, len(g.win_line), stones))
+print("    %d 回合结束，结果 %s，共 %d 手" % (
+    turns, ("胜者 %s" % g.winner) if g.winner else "平局", len(g.history)))
 
 # 点已有棋子的位置应被拒绝
 g = G.Game(level=1)
