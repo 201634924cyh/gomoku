@@ -24,6 +24,9 @@ except Exception:
 
 import gomoku as G  # noqa: E402
 
+# 重新初始化后旧 Font 已失效，必须清缓存（不清会在 render 时段错误）
+G.reset_font_cache()
+
 FAILS = []
 OKS = []
 
@@ -449,6 +452,44 @@ lvl_btn = [r for r, k in g.buttons if k == "level"][0]
 l0 = g.level
 click(lvl_btn.center)
 check("点击难度按钮", g.level != l0 or l0 == 3, "%s -> %s" % (l0, g.level))
+
+# ------------------------------------------------- 中文字体字形校验
+bad_path = pygame.font.match_font("dejavusans,arial,liberationsans")
+bad_font = None
+if bad_path and os.path.exists(bad_path):
+    try:
+        bad_font = pygame.font.Font(bad_path, 24)
+    except Exception:
+        bad_font = None
+check("反面样本：本机能取到一个「名字沾边但没有汉字字形」的字体",
+      bad_font is not None and not G.font_covers_cjk(bad_font),
+      "path=%s" % bad_path)
+check("探针：默认字体 Font(None) 被正确判定为画不出汉字",
+      not G.font_covers_cjk(pygame.font.Font(None, 24)))
+
+usable = None
+for _p in G.FONT_CANDIDATES:
+    if not os.path.exists(_p):
+        continue
+    try:
+        _pf = pygame.font.Font(_p, 24)
+    except Exception:
+        continue
+    if G.font_covers_cjk(_pf):
+        usable = _p
+        break
+if usable:
+    check("正向：系统装了中文字体时，get_font 选中的字体能画出汉字",
+          G.font_covers_cjk(G.get_font(24)), "可用候选 %s" % usable)
+else:
+    print("  [skip] 本机没有任何候选中文字体，正向断言跳过")
+
+if bad_font is not None:
+    _same, _src = G.font_regression(bad_path)
+    check("反事实：候选全是无汉字字体时退回默认字体，而不是拿来就用",
+          _same, "采用了 %s" % _src)
+else:
+    print("  [skip] 取不到无汉字反面样本，反事实断言跳过")
 
 # ---------------------------------------------------------------- 汇总
 print("\n" + "=" * 62)
