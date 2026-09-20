@@ -22,7 +22,7 @@ import argparse
 
 import pygame
 
-__version__ = "1.1"
+__version__ = "1.2"
 
 # --------------------------------------------------------------------------
 # 常量与布局
@@ -100,12 +100,40 @@ _CJK_PROBE = "汉字测试"        # 探针：这几个字必须渲染出彼此�
 _FONT_CACHE = {}
 _warned_no_cjk = False
 
+# ---------------- i18n: bilingual UI (v1.2) ----------------
+# 界面文案中英双语：默认中文，`--lang en` 切换英文。
+# 常量在模块加载时按 _LANG 求值，因此 --lang 在文件顶部立即解析。
+_LANG = "zh"
+
+
+def set_language(lang):
+    global _LANG
+    if lang in ("zh", "en"):
+        _LANG = lang
+
+
+def _t(zh, en):
+    return en if _LANG == "en" else zh
+
+
+def _bootstrap_lang():
+    argv = sys.argv[1:]
+    if "--lang" in argv:
+        i = argv.index("--lang")
+        if i + 1 < len(argv):
+            set_language(argv[i + 1])
+
+
+_bootstrap_lang()
+# ------------------------------------------------------------
+
+
 MODES = (
-    ("人机 · 你执黑", 0),
-    ("人机 · 你执白", 1),
-    ("双人对战", 2),
+    (_t("人机 · 你执黑", "AI · You play Black"), 0),
+    (_t("人机 · 你执白", "AI · You play White"), 1),
+    (_t("双人对战", "Two Players"), 2),
 )
-LEVEL_NAMES = ("", "简单", "普通", "困难")
+LEVEL_NAMES = ("", _t("简单", "Easy"), _t("普通", "Normal"), _t("困难", "Hard"))
 
 # --------------------------------------------------------------------------
 # 棋型分值
@@ -539,7 +567,7 @@ class Game:
     def __init__(self, level=2):
         self.level = max(1, min(3, level))
         self.screen = pygame.display.set_mode((W, H))
-        pygame.display.set_caption("五子棋 Gomoku")
+        pygame.display.set_caption(_t("五子棋 Gomoku", "Gomoku"))
         self.clock = pygame.time.Clock()
         self.bg_board = build_board_surface()
         self.stone_black = make_stone(STONE_R, (58, 58, 66))
@@ -853,7 +881,7 @@ class Game:
     def draw_top(self):
         pygame.draw.rect(self.screen, C_PANEL, (0, 0, W, HUD_TOP))
         pygame.draw.line(self.screen, C_PANEL_LINE, (0, HUD_TOP - 1), (W, HUD_TOP - 1))
-        r = draw_text(self.screen, "五子棋", 26, C_TEXT, (22, 12), bold=True)
+        r = draw_text(self.screen, _t("五子棋", "Gomoku"), 26, C_TEXT, (22, 12), bold=True)
         draw_text(self.screen, "GOMOKU", 12, C_MUTED,
                   (r.right + 10, r.centery + 5))
 
@@ -868,14 +896,14 @@ class Game:
 
         # 右侧回合指示
         if self.state == "over":
-            txt = "对局结束"
+            txt = _t("对局结束", "Game Over")
             col = C_ACCENT
         elif self.ai_thinking:
             dots = "." * (int(self.t * 3) % 4)
-            txt = "AI 思考中" + dots
+            txt = _t("AI 思考中", "AI thinking") + dots
             col = C_MUTED
         else:
-            txt = "黑棋回合" if self.current == BLACK else "白棋回合"
+            txt = _t("黑棋回合", "Black turn") if self.current == BLACK else _t("白棋回合", "White turn")
             col = C_TEXT
         f17 = get_font(17)
         tw = f17.size(txt)[0]
@@ -891,8 +919,8 @@ class Game:
         pygame.draw.rect(self.screen, C_PANEL, (0, y0, W, HUD_BOT))
         pygame.draw.line(self.screen, C_PANEL_LINE, (0, y0), (W, y0))
         self.buttons = []
-        specs = (("悔棋", "undo"), ("重开", "reset"),
-                 ("模式", "mode"), ("难度", "level"))
+        specs = ((_t("悔棋", "Undo"), "undo"), (_t("重开", "Restart"), "reset"),
+                 (_t("模式", "Mode"), "mode"), (_t("难度", "Level"), "level"))
         bw, bh, gap, x = 96, 42, 10, 20
         y = y0 + 21
         for text, key in specs:
@@ -909,9 +937,9 @@ class Game:
             self.buttons.append((rect, key))
             x += bw + gap
 
-        info = "第 %d 手" % len(self.history)
+        info = _t("第 %d 手", "Move %d") % len(self.history)
         draw_text(self.screen, info, 16, C_MUTED, (W - 22, y + 8), anchor="topright")
-        draw_text(self.screen, "黑棋先行 · 连五为胜", 13, (100, 110, 128),
+        draw_text(self.screen, _t("黑棋先行 · 连五为胜", "Black first · Five in a row wins"), 13, (100, 110, 128),
                   (W - 22, y + 27), anchor="topright")
 
     def _in_board_mouse(self, rect):
@@ -945,13 +973,13 @@ class Game:
         self.screen.blit(psurf, panel.topleft)
 
         if self.winner == 0:
-            title, col = "平局", C_TEXT
+            title, col = _t("平局", "Draw"), C_TEXT
         else:
-            who = "黑棋" if self.winner == BLACK else "白棋"
+            who = _t("黑棋", "Black") if self.winner == BLACK else _t("白棋", "White")
             if self.mode in (0, 1):
-                title = "你赢了！" if self.winner == self.human_color else "AI 获胜"
+                title = _t("你赢了！", "You win!") if self.winner == self.human_color else _t("AI 获胜", "AI wins")
             else:
-                title = who + "获胜"
+                title = who + _t("获胜", " wins")
             col = (C_ACCENT if self.mode in (0, 1)
                    and self.winner == self.human_color else C_WIN)
         title_rect = draw_text(self.screen, title, 38, col,
@@ -962,10 +990,10 @@ class Game:
             shrink = pygame.transform.smoothscale(icon, (32, 32))
             self.screen.blit(shrink,
                              (title_rect.left - 44, panel.y + 52 - 16))
-        sub = "共 %d 手 · %s" % (len(self.history), MODES[self.mode][0])
+        sub = _t("共 %d 手 · %s", "Moves: %d · %s") % (len(self.history), MODES[self.mode][0])
         draw_text(self.screen, sub, 15, C_MUTED, (panel.centerx, panel.y + 92),
                   anchor="center")
-        draw_text(self.screen, "按 R 重新开始 / U 悔棋", 14, (128, 140, 160),
+        draw_text(self.screen, _t("按 R 重新开始 / U 悔棋", "R restart / U undo"), 14, (128, 140, 160),
                   (panel.centerx, panel.y + 128), anchor="center")
 
     # ---------------- 主循环 ----------------
@@ -988,9 +1016,10 @@ class Game:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version", version="gomoku %s" % __version__)
-    ap.add_argument("--headless", action="store_true", help="虚拟显示，不弹窗")
-    ap.add_argument("--frames", type=int, default=0, help="跑够 N 帧后自动退出")
+    ap.add_argument("--headless", action="store_true", help=_t("虚拟显示，不弹窗", "headless: no window"))
+    ap.add_argument("--frames", type=int, default=0, help=_t("跑够 N 帧后自动退出", "exit after N frames"))
     ap.add_argument("--level", type=int, default=2, choices=(1, 2, 3))
+    ap.add_argument("--lang", choices=("zh", "en"), default="zh", help="UI 语言 zh / en")
     args = ap.parse_args()
 
     if args.headless:
